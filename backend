@@ -1,0 +1,901 @@
+
+Home
+smart-attendaHome
+smart-attendance-339
+
+Credits50% more
+User Avatar
+
+Preview
+Manage
+PublishLoading...Fixing a typo in the spec, then final verification:
+Created/app/memory/test_credentials.mdOct 7, 10:40 PM
+Edited/app/memory/SPEC.mdOct 7, 10:40 PM
+$ cd /app/frontend && yarn typecheck 2>&1 | tail -...Oct 7, 10:40 PM
+Final confirmation pass on the pages whose copy I just changed, plus the clean-data state:
+Took a screenshotScreenshotsImage 1Image 2Image 3Oct 7, 10:41 PM
+All four features are live and tier 1 is clean. One thing you must know before your demo: the engine upgrade invalidated the two existing face registrations, so SAJID and YASHVARDHAN now show "Not registered" and need their angles re-captured (30 seconds each).
+Oct 7, 10:41 PM
+All Four Features CompleteMulti-Angle Capture: up to 3 photos per student, each stored as its own encoding; recognition scores the live frame against every angle and keeps the best (the result panel even shows which angle matched). Capture during registration, or later via the new scan icon on the Students row → Face Enrollment page.Period Attendance: fixed 6 periods with an optional subject per scan. Uniqueness is now (student, date, period) — the same student can be marked once in each lecture. Your 3 existing records were migrated to Period 1 without loss. Dashboard "Present Today" counts distinct students present in ≥1 period, with a period-record count beside the date.Defaulter List: flagged section on Reports (students below 75%), with a "Print for HOD" button (print CSS hides the sidebar) and its own defaulters-only CSV export.Viva Walkthrough: new sidebar page — 9 pipeline steps with the real code line for each, 6 likely viva questions with honest answers, and a 7-step demo running order.⚠️ ACTION NEEDED BEFORE YOUR DEMO: calibration revealed a limitation — matching against 3 angles pushed some different-person scores to 79.1% while a same-person in harsh light fell to 78.8%, indicating there was no completely safe threshold. Therefore, I upgraded the engine to CLAHE + uniform-LBP (3776-dim, threshold 0.70): different people now peak at 63.7% vs same person 72–92%. Verified: same person 92%, and five different faces all rejected at 41–57%. The old 2048-dim encodings are not comparable, so SAJID and YASHVARDHAN should have their faces re-captured (Students → scan icon); currently, they show "Not registered". Login remains admin / admin123. The Flask + SQLite submission mirror has feature parity and was smoke-tested separately; README_PROJECT.md and the viva page document the v1→v2 reasoning for your examiner.Please test these updates at your convenience and let me know if issues remain or additional investigation is needed.
+
+Publish
+Code reviewOct 7, 10:41 PM
+
+
+
+Agent FinishedOct 7, 10:41 PMGive me all backend code for these how made it only code to show to my teacher
+Oct 8, 11:29 PM
+I'll pull every backend file verbatim so you can hand it over. Let me gather them.
+$ cd /app && echo "=== FILE SIZES (lines) ===" && ...Oct 8, 11:30 PM
+$ cd /app && mkdir -p submission && { for f in fl...Oct 8, 11:30 PM
+Viewed/app/submission/BACKEND_CODE_FLASK_SQLITE.txtOct 8, 11:30 PM
+Both bundles are saved as single files you can open or print:
+/app/submission/BACKEND_CODE_FLASK_SQLITE.txt (776 lines) — Flask + SQLite + OpenCV, matches your project spec exactly/app/submission/BACKEND_CODE_FASTAPI.txt (1372 lines) — the FastAPI version that runs the live previewBelow is the Flask + SQLite backend in full, since that's the stack your teacher asked for. It's 3 files.
+FILE 1 of 3 — requirements.txtflask>=3.0flask-cors>=4.0opencv-python-headless==4.14.0.94numpy>=1.26passlib>=1.7.4tzdata>=2024.2FILE 2 of 3 — face_engine.py(the face-recognition module: OpenCV detection + LBP encoding + cosine matching)
+"""Face engine — OpenCV Haar-cascade detection + uniform-LBP histograms.
+Chosen over `face_recognition` (dlib) and DeepFace because both need heavy nativebuilds / runtime model downloads that are unreliable in a sandbox; this engine is apip wheel (opencv-python-headless) + numpy, runs 100% offline, and is a realdetection -> encoding -> matching pipeline (no random or faked results):
+  1. decode a base64 image (JPEG data URL captured from the browser webcam)  2. detect the largest frontal face with OpenCV's Haar cascade classifier  3. preprocess: grayscale, crop, resize 128x128, CLAHE local contrast equalisation,     light blur to suppress JPEG/sensor noise  4. encode: uniform-LBP map -> 8x8 grid of 59-bin histograms -> L2-normalised     feature vector ("face encoding"), stored per student (up to 3 angles)  5. recognise: cosine similarity between the probe encoding and every stored     encoding; the best match above MATCH_THRESHOLD wins
+Why CLAHE + *uniform* LBP (v2 of this engine): plain global histogram equalisation plusraw 32-bin LBP left same-person and different-person score ranges overlapping once wematched against 3 enrolled angles (measured: different people peaked at 79.1%, while asame person in harsh light fell to 78.8% — no usable threshold). CLAHE equalises contrastper tile so one bright window cannot wash out the whole face, and uniform LBP keeps onlythe 58 patterns with <=2 bit transitions (edges/corners/spots) plus one bin for the noisyrest, which is both more discriminative and less noise-sensitive. Re-measured on the sameimages: different people now peak at 63.7% while a same person scores 72-92%."""
+import base64
+import cv2import numpy as np
+FACE_SIZE = 128  # registered faces are normalised to 128x128 grayscaleGRID = 8  # LBP histogram grid (8x8 cells)UNIFORM_BINS = 59  # 58 uniform patterns + 1 shared bin for non-uniform codesENCODING_DIM = GRID * GRID * UNIFORM_BINS  # 3776ENCODING_VERSION = 2  # bump when the descriptor changes; v1 vectors are 2048-dim
+# Calibrated on real portraits with 3 enrolled angles per person:#   same person   72-92 %   (mild re-scan 83-92 %, harsh light 64-78 %)#   different people  <= 63.7 %# 0.70 sits above every different-person score measured, so the failure mode is a# false *reject* ("Unknown Face", staff re-scans) rather than marking the wrong student.MATCH_THRESHOLD = 0.70
+_cascade: cv2.CascadeClassifier | None = None_clahe: cv2.CLAHE | None = None
+
+def _get_cascade() -> cv2.CascadeClassifier:    global _cascade    if _cascade is None:        _cascade = cv2.CascadeClassifier(            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"        )    return _cascade
+
+def _get_clahe() -> cv2.CLAHE:    global _clahe    if _clahe is None:        _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))    return _clahe
+
+def _build_uniform_lut() -> np.ndarray:    """Map each 8-bit LBP code to a uniform-pattern bin (58 uniform + 1 catch-all)."""    lut = np.full(256, UNIFORM_BINS - 1, dtype=np.uint8)    next_bin = 0    for value in range(256):        bits = [(value >> i) & 1 for i in range(8)]        transitions = sum(bits[i] != bits[(i + 1) % 8] for i in range(8))        if transitions <= 2:  # "uniform": at most two 0<->1 changes around the circle            lut[value] = next_bin            next_bin += 1    return lut
+
+_UNIFORM_LUT = _build_uniform_lut()
+
+def decode_image(data_url: str) -> np.ndarray:    """Decode a base64 data URL (or raw base64) into a BGR image."""    payload = data_url.split(",", 1)[-1]    try:        buf = np.frombuffer(base64.b64decode(payload), dtype=np.uint8)        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)    except Exception as exc:  # malformed base64 / bad payload        raise ValueError("Could not decode the captured image") from exc    if img is None:        raise ValueError("Could not decode the captured image")    # keep large uploads (e.g. phone photos) fast to process    if max(img.shape[0], img.shape[1]) > 1200:        scale = 1200.0 / max(img.shape[0], img.shape[1])        img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))    return img
+
+def detect_face(img: np.ndarray) -> tuple[int, int, int, int] | None:    """Return (x, y, w, h) of the largest frontal face, or None."""    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)    faces = _get_cascade().detectMultiScale(        gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)    )    if len(faces) == 0:        return None    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])    return int(x), int(y), int(w), int(h)
+
+def _preprocess(img: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:    """Crop, resize, CLAHE-equalise and denoise the face patch."""    x, y, w, h = box    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)    face = cv2.resize(gray[y : y + h, x : x + w], (FACE_SIZE, FACE_SIZE))    face = _get_clahe().apply(face)  # local contrast: a bright window can't wash out the face    return cv2.GaussianBlur(face, (3, 3), 0)
+
+def _uniform_lbp(face: np.ndarray) -> np.ndarray:    """Uniform Local Binary Pattern bins: 8-neighbour texture code per pixel."""    padded = cv2.copyMakeBorder(face, 1, 1, 1, 1, cv2.BORDER_REPLICATE).astype(np.int16)    center = padded[1:-1, 1:-1]    codes = np.zeros_like(center)    neighbours = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]    for bit, (dy, dx) in enumerate(neighbours):        patch = padded[1 + dy : 1 + dy + FACE_SIZE, 1 + dx : 1 + dx + FACE_SIZE]        codes |= ((patch > center).astype(np.int16) << bit)    return _UNIFORM_LUT[codes.astype(np.uint8)]
+
+def encode_face(img: np.ndarray, box: tuple[int, int, int, int]) -> list[float]:    """Encode the face at `box` into an L2-normalised uniform-LBP histogram vector."""    face = _preprocess(img, box)    codes = _uniform_lbp(face)    step = FACE_SIZE // GRID    vector: list[float] = []    for r in range(GRID):        for c in range(GRID):            cell = codes[r * step : (r + 1) * step, c * step : (c + 1) * step].ravel()            hist = np.bincount(cell, minlength=UNIFORM_BINS).astype(np.float64)[:UNIFORM_BINS]            total = hist.sum()            if total > 0:                hist /= total            vector.extend(hist.tolist())    v = np.asarray(vector, dtype=np.float32)    norm = float(np.linalg.norm(v))    if norm > 0:        v /= norm    return [round(float(x), 6) for x in v]
+
+def encoding_from_dataurl(data_url: str) -> list[float]:    """Full pipeline: data URL -> face encoding. Raises ValueError when no face is found."""    img = decode_image(data_url)    box = detect_face(img)    if box is None:        raise ValueError(            "No face detected — look straight at the camera in good light and try again"        )    return encode_face(img, box)
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:    """Cosine of the angle between two encodings. 0.0 for mismatched engine versions."""    if len(a) != len(b):  # a v1 (2048-dim) vector is meaningless against a v2 one        return 0.0    va = np.asarray(a, dtype=np.float32)    vb = np.asarray(b, dtype=np.float32)    na = float(np.linalg.norm(va))    nb = float(np.linalg.norm(vb))    if na == 0.0 or nb == 0.0:        return 0.0    return float(np.clip(np.dot(va, vb) / (na * nb), -1.0, 1.0))FILE 3 of 3 — app.py(Flask REST API + SQLite database: auth, students, face, attendance, reports)
+"""Flask + SQLite version of the Smart Attendance backend.
+REST API consumed by the React frontend, which proxies /api to port 8001.
+Run:    pip install -r requirements.txt    python app.py            # serves http://localhost:8001, creates attendance.db on first run
+Tables (attendance.db): users · students · attendancePasswords are stored as PBKDF2-SHA256 hashes (passlib), never plain text."""
+import csvimport ioimport jsonimport osimport reimport sqlite3import uuidfrom datetime import datetime, timedeltafrom functools import wrapsfrom zoneinfo import ZoneInfo
+from flask import Flask, jsonify, request, send_file, sessionfrom flask_cors import CORSfrom passlib.context import CryptContext
+from face_engine import MATCH_THRESHOLD, cosine_similarity, encoding_from_dataurl
+DB_PATH = os.environ.get("ATTENDANCE_DB", os.path.join(os.path.dirname(__file__), "attendance.db"))PORT = int(os.environ.get("PORT", "8001"))TZ = ZoneInfo(os.environ.get("APP_TZ", "Asia/Kolkata"))
+app = Flask(__name__)app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")app.permanent_session_lifetime = timedelta(days=7)CORS(app, supports_credentials=True)
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"])
+PERIOD_COUNT = 6MAX_SAMPLES = 3             # face angles stored per studentDEFAULTER_THRESHOLD = 75.0  # attendance % below this flags a defaulter
+SAMPLE_STUDENTS = [    ("STU001", "Aarav Sharma", "CSE-2A", "aarav.sharma@college.edu"),    ("STU002", "Priya Nair", "CSE-2A", "priya.nair@college.edu"),]
+SCHEMA = """CREATE TABLE IF NOT EXISTS users (    id            TEXT PRIMARY KEY,    username      TEXT UNIQUE NOT NULL,    password_hash TEXT NOT NULL,    created_at    TEXT NOT NULL);CREATE TABLE IF NOT EXISTS students (    id            TEXT PRIMARY KEY,    student_id    TEXT UNIQUE NOT NULL,    name          TEXT NOT NULL,    class_name    TEXT NOT NULL,    email         TEXT NOT NULL,    face_encoding TEXT,    face_encodings TEXT,    face_updated_at TEXT,    created_at    TEXT NOT NULL);CREATE TABLE IF NOT EXISTS attendance (    id              TEXT PRIMARY KEY,    student_id      TEXT NOT NULL REFERENCES students(student_id) ON DELETE CASCADE,    attendance_date TEXT NOT NULL,    attendance_time TEXT NOT NULL,    period          INTEGER NOT NULL DEFAULT 1,    subject         TEXT NOT NULL DEFAULT '',    status          TEXT NOT NULL DEFAULT 'Present',    UNIQUE (student_id, attendance_date, period));"""
+
+def get_db() -> sqlite3.Connection:    conn = sqlite3.connect(DB_PATH)    conn.row_factory = sqlite3.Row    conn.execute("PRAGMA foreign_keys = ON")    return conn
+
+def now_ist() -> datetime:    return datetime.now(TZ)
+
+def init_db() -> None:    with get_db() as conn:        conn.executescript(SCHEMA)        if not conn.execute("SELECT 1 FROM users WHERE username = ?", ("admin",)).fetchone():            conn.execute(                "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",                (str(uuid.uuid4()), "admin", pwd_context.hash("admin123"), now_ist().isoformat()),            )            print("seeded admin user 'admin' (password hashed with PBKDF2-SHA256)")        if conn.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:            for student_id, name, class_name, email in SAMPLE_STUDENTS:                conn.execute(                    "INSERT INTO students (id, student_id, name, class_name, email, face_encoding, created_at)"                    " VALUES (?, ?, ?, ?, ?, NULL, ?)",                    (str(uuid.uuid4()), student_id, name, class_name, email, now_ist().isoformat()),                )            print(f"seeded {len(SAMPLE_STUDENTS)} sample students (no faces, no attendance)")
+
+def login_required(fn):    @wraps(fn)    def wrapper(*args, **kwargs):        if "user_id" not in session:            return jsonify({"detail": "Not authenticated"}), 401        return fn(*args, **kwargs)
+    return wrapper
+
+def stored_encodings(row) -> list:    """All encodings for a student (multi-angle), tolerating the legacy single column."""    raw = row["face_encodings"] if "face_encodings" in row.keys() else None    if raw:        try:            samples = json.loads(raw)            if isinstance(samples, list) and samples:                return samples        except (TypeError, ValueError):            pass    if row["face_encoding"]:        return [json.loads(row["face_encoding"])]    return []
+
+def student_out(row) -> dict:    samples = stored_encodings(row)    return {        "id": row["id"],        "student_id": row["student_id"],        "name": row["name"],        "class_name": row["class_name"],        "email": row["email"],        "face_registered": len(samples) > 0,        "face_samples": len(samples),        "created_at": row["created_at"],    }
+
+# ---------------- auth ----------------
+@app.post("/api/auth/login")def login():    body = request.get_json(force=True, silent=True) or {}    username = str(body.get("username", "")).strip()[:50]    password = str(body.get("password", ""))[:100]    with get_db() as conn:        user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()    if not user or not pwd_context.verify(password, user["password_hash"]):        return jsonify({"detail": "Invalid username or password"}), 401    session.permanent = True    session["user_id"] = user["id"]    return jsonify({"id": user["id"], "username": user["username"]})
+
+@app.post("/api/auth/logout")def logout():    session.clear()    return jsonify({"ok": True})
+
+@app.get("/api/auth/me")@login_requireddef me():    with get_db() as conn:        user = conn.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()    if not user:        session.clear()        return jsonify({"detail": "Not authenticated"}), 401    return jsonify({"id": user["id"], "username": user["username"]})
+
+# ---------------- students ----------------
+@app.get("/api/students")@login_requireddef list_students():    with get_db() as conn:        rows = conn.execute("SELECT * FROM students ORDER BY student_id").fetchall()    return jsonify([student_out(r) for r in rows])
+
+@app.post("/api/students")@login_requireddef create_student():    body = request.get_json(force=True, silent=True) or {}    student_id = str(body.get("student_id", "")).strip()[:20]    name = str(body.get("name", "")).strip()[:100]    class_name = str(body.get("class_name", "")).strip()[:30]    email = str(body.get("email", "")).strip()[:100]    if len(student_id) < 2 or len(name) < 2 or not class_name or "@" not in email:        return jsonify({"detail": "Invalid student details"}), 422    with get_db() as conn:        if conn.execute("SELECT 1 FROM students WHERE student_id = ?", (student_id,)).fetchone():            return jsonify({"detail": f"Student ID {student_id} already exists"}), 409        conn.execute(            "INSERT INTO students (id, student_id, name, class_name, email, face_encoding, created_at)"            " VALUES (?, ?, ?, ?, ?, NULL, ?)",            (str(uuid.uuid4()), student_id, name, class_name, email, now_ist().isoformat()),        )        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()    return jsonify(student_out(row)), 201
+
+@app.put("/api/students/<student_id>")@login_requireddef update_student(student_id):    body = request.get_json(force=True, silent=True) or {}    with get_db() as conn:        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()        if not row:            return jsonify({"detail": "Student not found"}), 404        new_id = str(body.get("student_id") or row["student_id"]).strip()[:20]        name = str(body.get("name") or row["name"]).strip()[:100]        class_name = str(body.get("class_name") or row["class_name"]).strip()[:30]        email = str(body.get("email") or row["email"]).strip()[:100]        if new_id != student_id and conn.execute(            "SELECT 1 FROM students WHERE student_id = ?", (new_id,)        ).fetchone():            return jsonify({"detail": f"Student ID {new_id} already exists"}), 409        conn.execute(            "UPDATE students SET student_id = ?, name = ?, class_name = ?, email = ? WHERE student_id = ?",            (new_id, name, class_name, email, student_id),        )        conn.execute("UPDATE attendance SET student_id = ? WHERE student_id = ?", (new_id, student_id))        updated = conn.execut
+Preview
+Manage
+Publish
+Loading...
+Fixing a typo in the spec, then final verification:
+Created/app/memory/test_credentials.md
+Oct 7, 10:40 PM
+Edited/app/memory/SPEC.md
+Oct 7, 10:40 PM
+$ cd /app/frontend && yarn typecheck 2>&1 | tail -...
+Oct 7, 10:40 PM
+Final confirmation pass on the pages whose copy I just changed, plus the clean-data state:
+Took a screenshot
+Screenshots
+Oct 7, 10:41 PM
+All four features are live and tier 1 is clean. One thing you must know before your demo: the engine upgrade invalidated the two existing face registrations, so SAJID and YASHVARDHAN now show "Not registered" and need their angles re-captured (30 seconds each).
+Oct 7, 10:41 PM
+All Four Features CompleteMulti-Angle Capture: up to 3 photos per student, each stored as its own encoding; recognition scores the live frame against every angle and keeps the best (the result panel even shows which angle matched). Capture during registration, or later via the new scan icon on the Students row → Face Enrollment page.Period Attendance: fixed 6 periods with an optional subject per scan. Uniqueness is now (student, date, period) — the same student can be marked once in each lecture. Your 3 existing records were migrated to Period 1 without loss. Dashboard "Present Today" counts distinct students present in ≥1 period, with a period-record count beside the date.Defaulter List: flagged section on Reports (students below 75%), with a "Print for HOD" button (print CSS hides the sidebar) and its own defaulters-only CSV export.Viva Walkthrough: new sidebar page — 9 pipeline steps with the real code line for each, 6 likely viva questions with honest answers, and a 7-step demo running order.⚠️ ACTION NEEDED BEFORE YOUR DEMO: calibration revealed a limitation — matching against 3 angles pushed some different-person scores to 79.1% while a same-person in harsh light fell to 78.8%, indicating there was no completely safe threshold. Therefore, I upgraded the engine to CLAHE + uniform-LBP (3776-dim, threshold 0.70): different people now peak at 63.7% vs same person 72–92%. Verified: same person 92%, and five different faces all rejected at 41–57%. The old 2048-dim encodings are not comparable, so SAJID and YASHVARDHAN should have their faces re-captured (Students → scan icon); currently, they show "Not registered". Login remains admin / admin123. The Flask + SQLite submission mirror has feature parity and was smoke-tested separately; README_PROJECT.md and the viva page document the v1→v2 reasoning for your examiner.
+Please test these updates at your convenience and let me know if issues remain or additional investigation is needed.
+Publish
+Code review
+Oct 7, 10:41 PM
+Agent Finished
+Oct 7, 10:41 PM
+Give me all backend code for these how made it only code to show to my teacher
+Oct 8, 11:29 PM
+I'll pull every backend file verbatim so you can hand it over. Let me gather them.
+$ cd /app && echo "=== FILE SIZES (lines) ===" && ...
+Oct 8, 11:30 PM
+$ cd /app && mkdir -p submission && { for f in fl...
+Oct 8, 11:30 PM
+Viewed/app/submission/BACKEND_CODE_FLASK_SQLITE.txt
+Oct 8, 11:30 PM
+Both bundles are saved as single files you can open or print:
+/app/submission/BACKEND_CODE_FLASK_SQLITE.txt (776 lines) — Flask + SQLite + OpenCV, matches your project spec exactly/app/submission/BACKEND_CODE_FASTAPI.txt (1372 lines) — the FastAPI version that runs the live preview
+Below is the Flask + SQLite backend in full, since that's the stack your teacher asked for. It's 3 files.
+FILE 1 of 3 — requirements.txtflask>=3.0
+flask-cors>=4.0
+opencv-python-headless==4.14.0.94
+numpy>=1.26
+passlib>=1.7.4
+tzdata>=2024.2
+FILE 2 of 3 — face_engine.py
+(the face-recognition module: OpenCV detection + LBP encoding + cosine matching)
+"""Face engine — OpenCV Haar-cascade detection + uniform-LBP histograms.
+
+Chosen over `face_recognition` (dlib) and DeepFace because both need heavy native
+builds / runtime model downloads that are unreliable in a sandbox; this engine is a
+pip wheel (opencv-python-headless) + numpy, runs 100% offline, and is a real
+detection -> encoding -> matching pipeline (no random or faked results):
+
+  1. decode a base64 image (JPEG data URL captured from the browser webcam)
+  2. detect the largest frontal face with OpenCV's Haar cascade classifier
+  3. preprocess: grayscale, crop, resize 128x128, CLAHE local contrast equalisation,
+     light blur to suppress JPEG/sensor noise
+  4. encode: uniform-LBP map -> 8x8 grid of 59-bin histograms -> L2-normalised
+     feature vector ("face encoding"), stored per student (up to 3 angles)
+  5. recognise: cosine similarity between the probe encoding and every stored
+     encoding; the best match above MATCH_THRESHOLD wins
+
+Why CLAHE + *uniform* LBP (v2 of this engine): plain global histogram equalisation plus
+raw 32-bin LBP left same-person and different-person score ranges overlapping once we
+matched against 3 enrolled angles (measured: different people peaked at 79.1%, while a
+same person in harsh light fell to 78.8% — no usable threshold). CLAHE equalises contrast
+per tile so one bright window cannot wash out the whole face, and uniform LBP keeps only
+the 58 patterns with <=2 bit transitions (edges/corners/spots) plus one bin for the noisy
+rest, which is both more discriminative and less noise-sensitive. Re-measured on the same
+images: different people now peak at 63.7% while a same person scores 72-92%.
+"""
+
+import base64
+
+import cv2
+import numpy as np
+
+FACE_SIZE = 128  # registered faces are normalised to 128x128 grayscale
+GRID = 8  # LBP histogram grid (8x8 cells)
+UNIFORM_BINS = 59  # 58 uniform patterns + 1 shared bin for non-uniform codes
+ENCODING_DIM = GRID * GRID * UNIFORM_BINS  # 3776
+ENCODING_VERSION = 2  # bump when the descriptor changes; v1 vectors are 2048-dim
+
+# Calibrated on real portraits with 3 enrolled angles per person:
+#   same person   72-92 %   (mild re-scan 83-92 %, harsh light 64-78 %)
+#   different people  <= 63.7 %
+# 0.70 sits above every different-person score measured, so the failure mode is a
+# false *reject* ("Unknown Face", staff re-scans) rather than marking the wrong student.
+MATCH_THRESHOLD = 0.70
+
+_cascade: cv2.CascadeClassifier | None = None
+_clahe: cv2.CLAHE | None = None
+
+
+def _get_cascade() -> cv2.CascadeClassifier:
+    global _cascade
+    if _cascade is None:
+        _cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+    return _cascade
+
+
+def _get_clahe() -> cv2.CLAHE:
+    global _clahe
+    if _clahe is None:
+        _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return _clahe
+
+
+def _build_uniform_lut() -> np.ndarray:
+    """Map each 8-bit LBP code to a uniform-pattern bin (58 uniform + 1 catch-all)."""
+    lut = np.full(256, UNIFORM_BINS - 1, dtype=np.uint8)
+    next_bin = 0
+    for value in range(256):
+        bits = [(value >> i) & 1 for i in range(8)]
+        transitions = sum(bits[i] != bits[(i + 1) % 8] for i in range(8))
+        if transitions <= 2:  # "uniform": at most two 0<->1 changes around the circle
+            lut[value] = next_bin
+            next_bin += 1
+    return lut
+
+
+_UNIFORM_LUT = _build_uniform_lut()
+
+
+def decode_image(data_url: str) -> np.ndarray:
+    """Decode a base64 data URL (or raw base64) into a BGR image."""
+    payload = data_url.split(",", 1)[-1]
+    try:
+        buf = np.frombuffer(base64.b64decode(payload), dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    except Exception as exc:  # malformed base64 / bad payload
+        raise ValueError("Could not decode the captured image") from exc
+    if img is None:
+        raise ValueError("Could not decode the captured image")
+    # keep large uploads (e.g. phone photos) fast to process
+    if max(img.shape[0], img.shape[1]) > 1200:
+        scale = 1200.0 / max(img.shape[0], img.shape[1])
+        img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+    return img
+
+
+def detect_face(img: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Return (x, y, w, h) of the largest frontal face, or None."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = _get_cascade().detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
+    )
+    if len(faces) == 0:
+        return None
+    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+    return int(x), int(y), int(w), int(h)
+
+
+def _preprocess(img: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    """Crop, resize, CLAHE-equalise and denoise the face patch."""
+    x, y, w, h = box
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    face = cv2.resize(gray[y : y + h, x : x + w], (FACE_SIZE, FACE_SIZE))
+    face = _get_clahe().apply(face)  # local contrast: a bright window can't wash out the face
+    return cv2.GaussianBlur(face, (3, 3), 0)
+
+
+def _uniform_lbp(face: np.ndarray) -> np.ndarray:
+    """Uniform Local Binary Pattern bins: 8-neighbour texture code per pixel."""
+    padded = cv2.copyMakeBorder(face, 1, 1, 1, 1, cv2.BORDER_REPLICATE).astype(np.int16)
+    center = padded[1:-1, 1:-1]
+    codes = np.zeros_like(center)
+    neighbours = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+    for bit, (dy, dx) in enumerate(neighbours):
+        patch = padded[1 + dy : 1 + dy + FACE_SIZE, 1 + dx : 1 + dx + FACE_SIZE]
+        codes |= ((patch > center).astype(np.int16) << bit)
+    return _UNIFORM_LUT[codes.astype(np.uint8)]
+
+
+def encode_face(img: np.ndarray, box: tuple[int, int, int, int]) -> list[float]:
+    """Encode the face at `box` into an L2-normalised uniform-LBP histogram vector."""
+    face = _preprocess(img, box)
+    codes = _uniform_lbp(face)
+    step = FACE_SIZE // GRID
+    vector: list[float] = []
+    for r in range(GRID):
+        for c in range(GRID):
+            cell = codes[r * step : (r + 1) * step, c * step : (c + 1) * step].ravel()
+            hist = np.bincount(cell, minlength=UNIFORM_BINS).astype(np.float64)[:UNIFORM_BINS]
+            total = hist.sum()
+            if total > 0:
+                hist /= total
+            vector.extend(hist.tolist())
+    v = np.asarray(vector, dtype=np.float32)
+    norm = float(np.linalg.norm(v))
+    if norm > 0:
+        v /= norm
+    return [round(float(x), 6) for x in v]
+
+
+def encoding_from_dataurl(data_url: str) -> list[float]:
+    """Full pipeline: data URL -> face encoding. Raises ValueError when no face is found."""
+    img = decode_image(data_url)
+    box = detect_face(img)
+    if box is None:
+        raise ValueError(
+            "No face detected — look straight at the camera in good light and try again"
+        )
+    return encode_face(img, box)
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine of the angle between two encodings. 0.0 for mismatched engine versions."""
+    if len(a) != len(b):  # a v1 (2048-dim) vector is meaningless against a v2 one
+        return 0.0
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.clip(np.dot(va, vb) / (na * nb), -1.0, 1.0))
+FILE 3 of 3 — app.py
+(Flask REST API + SQLite database: auth, students, face, attendance, reports)
+"""Flask + SQLite version of the Smart Attendance backend.
+
+REST API consumed by the React frontend, which proxies /api to port 8001.
+
+Run:
+    pip install -r requirements.txt
+    python app.py            # serves http://localhost:8001, creates attendance.db on first run
+
+Tables (attendance.db): users · students · attendance
+Passwords are stored as PBKDF2-SHA256 hashes (passlib), never plain text.
+"""
+
+import csv
+import io
+import json
+import os
+import re
+import sqlite3
+import uuid
+from datetime import datetime, timedelta
+from functools import wraps
+from zoneinfo import ZoneInfo
+
+from flask import Flask, jsonify, request, send_file, session
+from flask_cors import CORS
+from passlib.context import CryptContext
+
+from face_engine import MATCH_THRESHOLD, cosine_similarity, encoding_from_dataurl
+
+DB_PATH = os.environ.get("ATTENDANCE_DB", os.path.join(os.path.dirname(__file__), "attendance.db"))
+PORT = int(os.environ.get("PORT", "8001"))
+TZ = ZoneInfo(os.environ.get("APP_TZ", "Asia/Kolkata"))
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+app.permanent_session_lifetime = timedelta(days=7)
+CORS(app, supports_credentials=True)
+
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"])
+
+PERIOD_COUNT = 6
+MAX_SAMPLES = 3             # face angles stored per student
+DEFAULTER_THRESHOLD = 75.0  # attendance % below this flags a defaulter
+
+SAMPLE_STUDENTS = [
+    ("STU001", "Aarav Sharma", "CSE-2A", "aarav.sharma@college.edu"),
+    ("STU002", "Priya Nair", "CSE-2A", "priya.nair@college.edu"),
+]
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS students (
+    id            TEXT PRIMARY KEY,
+    student_id    TEXT UNIQUE NOT NULL,
+    name          TEXT NOT NULL,
+    class_name    TEXT NOT NULL,
+    email         TEXT NOT NULL,
+    face_encoding TEXT,
+    face_encodings TEXT,
+    face_updated_at TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS attendance (
+    id              TEXT PRIMARY KEY,
+    student_id      TEXT NOT NULL REFERENCES students(student_id) ON DELETE CASCADE,
+    attendance_date TEXT NOT NULL,
+    attendance_time TEXT NOT NULL,
+    period          INTEGER NOT NULL DEFAULT 1,
+    subject         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'Present',
+    UNIQUE (student_id, attendance_date, period)
+);
+"""
+
+
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def now_ist() -> datetime:
+    return datetime.now(TZ)
+
+
+def init_db() -> None:
+    with get_db() as conn:
+        conn.executescript(SCHEMA)
+        if not conn.execute("SELECT 1 FROM users WHERE username = ?", ("admin",)).fetchone():
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), "admin", pwd_context.hash("admin123"), now_ist().isoformat()),
+            )
+            print("seeded admin user 'admin' (password hashed with PBKDF2-SHA256)")
+        if conn.execute("SELECT COUNT(*) FROM students").fetchone()[0] == 0:
+            for student_id, name, class_name, email in SAMPLE_STUDENTS:
+                conn.execute(
+                    "INSERT INTO students (id, student_id, name, class_name, email, face_encoding, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                    (str(uuid.uuid4()), student_id, name, class_name, email, now_ist().isoformat()),
+                )
+            print(f"seeded {len(SAMPLE_STUDENTS)} sample students (no faces, no attendance)")
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"detail": "Not authenticated"}), 401
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def stored_encodings(row) -> list:
+    """All encodings for a student (multi-angle), tolerating the legacy single column."""
+    raw = row["face_encodings"] if "face_encodings" in row.keys() else None
+    if raw:
+        try:
+            samples = json.loads(raw)
+            if isinstance(samples, list) and samples:
+                return samples
+        except (TypeError, ValueError):
+            pass
+    if row["face_encoding"]:
+        return [json.loads(row["face_encoding"])]
+    return []
+
+
+def student_out(row) -> dict:
+    samples = stored_encodings(row)
+    return {
+        "id": row["id"],
+        "student_id": row["student_id"],
+        "name": row["name"],
+        "class_name": row["class_name"],
+        "email": row["email"],
+        "face_registered": len(samples) > 0,
+        "face_samples": len(samples),
+        "created_at": row["created_at"],
+    }
+
+
+# ---------------- auth ----------------
+
+@app.post("/api/auth/login")
+def login():
+    body = request.get_json(force=True, silent=True) or {}
+    username = str(body.get("username", "")).strip()[:50]
+    password = str(body.get("password", ""))[:100]
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not user or not pwd_context.verify(password, user["password_hash"]):
+        return jsonify({"detail": "Invalid username or password"}), 401
+    session.permanent = True
+    session["user_id"] = user["id"]
+    return jsonify({"id": user["id"], "username": user["username"]})
+
+
+@app.post("/api/auth/logout")
+def logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+@login_required
+def me():
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    if not user:
+        session.clear()
+        return jsonify({"detail": "Not authenticated"}), 401
+    return jsonify({"id": user["id"], "username": user["username"]})
+
+
+# ---------------- students ----------------
+
+@app.get("/api/students")
+@login_required
+def list_students():
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM students ORDER BY student_id").fetchall()
+    return jsonify([student_out(r) for r in rows])
+
+
+@app.post("/api/students")
+@login_required
+def create_student():
+    body = request.get_json(force=True, silent=True) or {}
+    student_id = str(body.get("student_id", "")).strip()[:20]
+    name = str(body.get("name", "")).strip()[:100]
+    class_name = str(body.get("class_name", "")).strip()[:30]
+    email = str(body.get("email", "")).strip()[:100]
+    if len(student_id) < 2 or len(name) < 2 or not class_name or "@" not in email:
+        return jsonify({"detail": "Invalid student details"}), 422
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM students WHERE student_id = ?", (student_id,)).fetchone():
+            return jsonify({"detail": f"Student ID {student_id} already exists"}), 409
+        conn.execute(
+            "INSERT INTO students (id, student_id, name, class_name, email, face_encoding, created_at)"
+            " VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (str(uuid.uuid4()), student_id, name, class_name, email, now_ist().isoformat()),
+        )
+        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()
+    return jsonify(student_out(row)), 201
+
+
+@app.put("/api/students/<student_id>")
+@login_required
+def update_student(student_id):
+    body = request.get_json(force=True, silent=True) or {}
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()
+        if not row:
+            return jsonify({"detail": "Student not found"}), 404
+        new_id = str(body.get("student_id") or row["student_id"]).strip()[:20]
+        name = str(body.get("name") or row["name"]).strip()[:100]
+        class_name = str(body.get("class_name") or row["class_name"]).strip()[:30]
+        email = str(body.get("email") or row["email"]).strip()[:100]
+        if new_id != student_id and conn.execute(
+            "SELECT 1 FROM students WHERE student_id = ?", (new_id,)
+        ).fetchone():
+            return jsonify({"detail": f"Student ID {new_id} already exists"}), 409
+        conn.execute(
+            "UPDATE students SET student_id = ?, name = ?, class_name = ?, email = ? WHERE student_id = ?",
+            (new_id, name, class_name, email, student_id),
+        )
+        conn.execute("UPDATE attendance SET student_id = ? WHERE student_id = ?", (new_id, student_id))
+        updated = conn.execute("SELECT * FROM students WHERE student_id = ?", (new_id,)).fetchone()
+    return jsonify(student_out(updated))
+
+
+@app.delete("/api/students/<student_id>")
+@login_required
+def delete_student(student_id):
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM students WHERE student_id = ?", (student_id,)).fetchone():
+            return jsonify({"detail": "Student not found"}), 404
+        conn.execute("DELETE FROM attendance WHERE student_id = ?", (student_id,))  # cascade
+        conn.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
+    return jsonify({"ok": True})
+
+
+# ---------------- face ----------------
+
+@app.post("/api/face/capture")
+@login_required
+def face_capture():
+    body = request.get_json(force=True, silent=True) or {}
+    student_id = str(body.get("student_id", ""))
+    image = str(body.get("image", ""))
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()
+        if not row:
+            return jsonify({"detail": "Student not found — register the student first"}), 404
+        try:
+            encoding = encoding_from_dataurl(image)
+        except ValueError as exc:
+            return jsonify({"detail": str(exc)}), 400
+        samples = stored_encodings(row)
+        if len(samples) >= MAX_SAMPLES:
+            return jsonify(
+                {"detail": f"All {MAX_SAMPLES} face angles are already stored — clear them to re-capture"}
+            ), 400
+        samples.append(encoding)
+        conn.execute(
+            "UPDATE students SET face_encodings = ?, face_encoding = ?, face_updated_at = ?"
+            " WHERE student_id = ?",
+            (json.dumps(samples), json.dumps(samples[0]), now_ist().isoformat(), student_id),
+        )
+    remaining = MAX_SAMPLES - len(samples)
+    return jsonify(
+        {
+            "student_id": student_id,
+            "name": row["name"],
+            "face_registered": True,
+            "encoding_dim": len(encoding),
+            "face_samples": len(samples),
+            "message": f"Face angle {len(samples)} of {MAX_SAMPLES} stored"
+            + (f" — {remaining} more recommended for low light" if remaining else " — enrollment complete"),
+        }
+    )
+
+
+@app.get("/api/face/samples/<student_id>")
+@login_required
+def face_samples(student_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()
+    if not row:
+        return jsonify({"detail": "Student not found"}), 404
+    return jsonify(
+        {"student_id": student_id, "name": row["name"],
+         "face_samples": len(stored_encodings(row)), "max_samples": MAX_SAMPLES}
+    )
+
+
+@app.delete("/api/face/samples/<student_id>")
+@login_required
+def clear_face_samples(student_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM students WHERE student_id = ?", (student_id,)).fetchone()
+        if not row:
+            return jsonify({"detail": "Student not found"}), 404
+        conn.execute(
+            "UPDATE students SET face_encodings = NULL, face_encoding = NULL, face_updated_at = NULL"
+            " WHERE student_id = ?",
+            (student_id,),
+        )
+    return jsonify(
+        {"student_id": student_id, "name": row["name"], "face_samples": 0, "max_samples": MAX_SAMPLES}
+    )
+
+
+@app.post("/api/face/recognize")
+@login_required
+def face_recognize():
+    body = request.get_json(force=True, silent=True) or {}
+    period = int(body.get("period") or 1)
+    subject = str(body.get("subject") or "")[:60]
+    if not 1 <= period <= PERIOD_COUNT:
+        return jsonify({"detail": f"period must be between 1 and {PERIOD_COUNT}"}), 422
+    try:
+        probe = encoding_from_dataurl(str(body.get("image", "")))
+    except ValueError as exc:
+        return jsonify(
+            {"recognized": False, "message": str(exc), "similarity": None,
+             "threshold": MATCH_THRESHOLD, "student": None, "attendance_status": None,
+             "period": period, "subject": subject, "matched_sample": None}
+        )
+
+    # best score across every student AND every stored angle of that student
+    best_sim, best_row, best_index = 0.0, None, 0
+    with get_db() as conn:
+        for row in conn.execute("SELECT * FROM students").fetchall():
+            for index, sample in enumerate(stored_encodings(row), start=1):
+                sim = cosine_similarity(probe, sample)
+                if sim > best_sim:
+                    best_sim, best_row, best_index = sim, row, index
+
+    if best_row is None or best_sim < MATCH_THRESHOLD:
+        return jsonify(
+            {
+                "recognized": False,
+                "message": "Unknown face — no registered match found",
+                "similarity": round(best_sim * 100, 1) if best_row else None,
+                "threshold": MATCH_THRESHOLD,
+                "student": None,
+                "attendance_status": None,
+                "period": period,
+                "subject": subject,
+                "matched_sample": None,
+            }
+        )
+
+    student = {
+        "student_id": best_row["student_id"],
+        "name": best_row["name"],
+        "class_name": best_row["class_name"],
+    }
+    similarity = round(best_sim * 100, 1)
+    today = now_ist().strftime("%Y-%m-%d")
+
+    def payload(message, status):
+        return jsonify(
+            {"recognized": True, "message": message, "similarity": similarity,
+             "threshold": MATCH_THRESHOLD, "student": student, "attendance_status": status,
+             "period": period, "subject": subject, "matched_sample": best_index}
+        )
+
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM attendance WHERE student_id = ? AND attendance_date = ? AND period = ?",
+            (student["student_id"], today, period),
+        ).fetchone()
+        if existing:
+            return payload(f"Already marked for Period {period} today", "already_marked")
+        try:
+            conn.execute(
+                "INSERT INTO attendance (id, student_id, attendance_date, attendance_time, period,"
+                " subject, status) VALUES (?, ?, ?, ?, ?, ?, 'Present')",
+                (str(uuid.uuid4()), student["student_id"], today,
+                 now_ist().strftime("%H:%M:%S"), period, subject),
+            )
+        except sqlite3.IntegrityError:
+            return payload(f"Already marked for Period {period} today", "already_marked")
+    return payload(f"Attendance marked for Period {period}", "marked")
+
+
+# ---------------- attendance ----------------
+
+@app.get("/api/attendance/stats")
+@login_required
+def attendance_stats():
+    date = request.args.get("date") or now_ist().strftime("%Y-%m-%d")
+    with get_db() as conn:
+        total_students = conn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+        records_today = conn.execute(
+            "SELECT COUNT(*) FROM attendance WHERE attendance_date = ? AND status = 'Present'", (date,)
+        ).fetchone()[0]
+        # "Present today" = distinct students seen in at least one period today
+        present_today = conn.execute(
+            "SELECT COUNT(DISTINCT student_id) FROM attendance"
+            " WHERE attendance_date = ? AND status = 'Present'",
+            (date,),
+        ).fetchone()[0]
+    absent_today = max(total_students - present_today, 0)
+    percentage = round(present_today / total_students * 100, 1) if total_students else 0.0
+    return jsonify(
+        {"date": date, "total_students": total_students, "present_today": present_today,
+         "absent_today": absent_today, "attendance_percentage": percentage,
+         "records_today": records_today}
+    )
+
+
+@app.get("/api/attendance")
+@login_required
+def list_attendance():
+    date = request.args.get("date")
+    class_name = request.args.get("class_name")
+    period = request.args.get("period")
+    search = (request.args.get("search") or "").strip()
+    limit = min(int(request.args.get("limit", 500)), 2000)
+
+    # join so class/name filters and the response read from the student record
+    query = (
+        "SELECT a.*, s.name AS student_name, s.class_name AS class_name"
+        " FROM attendance a JOIN students s ON s.student_id = a.student_id WHERE 1=1"
+    )
+    args = []
+    if date:
+        query += " AND a.attendance_date = ?"
+        args.append(date)
+    if class_name:
+        query += " AND s.class_name = ?"
+        args.append(class_name)
+    if period:
+        query += " AND a.period = ?"
+        args.append(int(period))
+    if search:
+        query += " AND (s.name LIKE ? OR a.student_id LIKE ?)"
+        args += [f"%{search}%", f"%{search}%"]
+    query += " ORDER BY a.attendance_date DESC, a.period ASC, a.attendance_time DESC LIMIT ?"
+    args.append(limit)
+
+    with get_db() as conn:
+        rows = conn.execute(query, args).fetchall()
+
+    return jsonify(
+        [
+            {
+                "id": r["id"],
+                "student_id": r["student_id"],
+                "student_name": r["student_name"],
+                "class_name": r["class_name"],
+                "attendance_date": r["attendance_date"],
+                "attendance_time": r["attendance_time"],
+                "period": r["period"],
+                "subject": r["subject"] or "",
+                "status": r["status"],
+            }
+            for r in rows
+        ]
+    )
+
+
+# ---------------- reports ----------------
+
+def _build_report(from_date, to_date):
+    with get_db() as conn:
+        students = conn.execute("SELECT * FROM students ORDER BY student_id").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM attendance WHERE attendance_date >= ? AND attendance_date <= ?",
+            (from_date, to_date),
+        ).fetchall()
+    # a session is one (date, period) slot that actually happened
+    total_sessions = len({(r["attendance_date"], r["period"]) for r in rows})
+    present_by_student = {}
+    for r in rows:
+        present_by_student[r["student_id"]] = present_by_student.get(r["student_id"], 0) + 1
+    per_student = []
+    for s in students:
+        present = present_by_student.get(s["student_id"], 0)
+        per_student.append(
+            {
+                "student_id": s["student_id"],
+                "name": s["name"],
+                "class_name": s["class_name"],
+                "present_days": present,
+                "total_days": total_sessions,
+                "percentage": round(present / total_sessions * 100, 1) if total_sessions else 0.0,
+            }
+        )
+    present_count = len(rows)
+    total_slots = len(students) * total_sessions
+    defaulters = sorted(
+        [r for r in per_student if r["percentage"] < DEFAULTER_THRESHOLD],
+        key=lambda r: r["percentage"],
+    )
+    return {
+        "from_date": from_date,
+        "to_date": to_date,
+        "total_students": len(students),
+        "total_days": total_sessions,
+        "present_count": present_count,
+        "absent_count": max(total_slots - present_count, 0),
+        "attendance_percentage": round(present_count / total_slots * 100, 1) if total_slots else 0.0,
+        "defaulter_threshold": DEFAULTER_THRESHOLD,
+        "per_student": per_student,
+        "defaulters": defaulters,
+    }
+
+
+@app.get("/api/reports/summary")
+@login_required
+def reports_summary():
+    from_date = request.args.get("from_date") or now_ist().strftime("%Y-%m-%d")
+    to_date = request.args.get("to_date") or from_date
+    if from_date > to_date:
+        return jsonify({"detail": "from_date must be on or before to_date"}), 400
+    return jsonify(_build_report(from_date, to_date))
+
+
+@app.get("/api/reports/csv")
+@login_required
+def reports_csv():
+    from_date = request.args.get("from_date") or now_ist().strftime("%Y-%m-%d")
+    to_date = request.args.get("to_date") or from_date
+    defaulters_only = request.args.get("defaulters_only", "").lower() in ("1", "true", "yes")
+    data = _build_report(from_date, to_date)
+    rows = data["defaulters"] if defaulters_only else data["per_student"]
+    title = (
+        f"AI Smart Attendance System - Defaulter List (below {data['defaulter_threshold']}%)"
+        if defaulters_only
+        else "AI Smart Attendance System - Attendance Report"
+    )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([title])
+    writer.writerow(["From", data["from_date"], "To", data["to_date"]])
+    writer.writerow(["Sessions (date x period)", data["total_days"]])
+    writer.writerow([])
+    writer.writerow(
+        ["Student ID", "Name", "Class", "Sessions", "Periods Attended", "Missed", "Attendance %"]
+    )
+    for r in rows:
+        writer.writerow(
+            [r["student_id"], r["name"], r["class_name"], r["total_days"], r["present_days"],
+             r["total_days"] - r["present_days"], f"{r['percentage']}%"]
+        )
+    writer.writerow([])
+    writer.writerow(["Total Students", data["total_students"]])
+    writer.writerow(["Attendance Records (present)", data["present_count"]])
+    writer.writerow(["Absent (missed periods)", data["absent_count"]])
+    writer.writerow(["Overall Attendance %", f"{data['attendance_percentage']}%"])
+    writer.writerow([f"Defaulters (<{data['defaulter_threshold']}%)", len(data["defaulters"])])
+    buf.seek(0)
+    prefix = "defaulter_list" if defaulters_only else "attendance_report"
+    return send_file(
+        io.BytesIO(buf.getvalue().encode("utf-8")),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"{prefix}_{from_date}_to_{to_date}.csv",
+    )
+
+
+if __name__ == "__main__":
+    init_db()
+    app.run(host="0.0.0.0", port=PORT, debug=False)
